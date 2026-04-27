@@ -1,7 +1,7 @@
 from datetime import datetime
 from flask_login import UserMixin
 from werkzeug.security import generate_password_hash, check_password_hash
-from sqlalchemy import CheckConstraint, event, DDL
+from sqlalchemy import CheckConstraint, event
 from sqlalchemy.orm import validates
 from app import db, login_manager
 
@@ -12,14 +12,35 @@ MODELS_WITH_UPDATED_AT = [
     'Approval', 'AssetTransfer'
 ]
 
+MODELS_WITH_CREATED_AT = [
+    'User', 'Department', 'Asset', 'AssetStatusLog', 'PurchaseRequest',
+    'PurchaseRequestItem', 'AssetEntry', 'AssetEntryItem', 'AssetBorrow',
+    'AssetDisposal', 'Budget', 'BudgetUsageLog', 'Inventory', 'InventoryItem',
+    'Maintenance', 'MaintenancePlan', 'Approval', 'AssetTransfer', 'Notification'
+]
+
 
 @event.listens_for(db.session, 'before_flush')
 def update_timestamps(session, flush_context, instances):
-    for instance in session.dirty:
+    current_time = datetime.utcnow()
+    
+    for instance in session.new:
         class_name = instance.__class__.__name__
+        
+        if class_name in MODELS_WITH_CREATED_AT:
+            if hasattr(instance, 'created_at') and instance.created_at is None:
+                instance.created_at = current_time
+        
         if class_name in MODELS_WITH_UPDATED_AT:
             if hasattr(instance, 'updated_at'):
-                instance.updated_at = datetime.utcnow()
+                instance.updated_at = current_time
+    
+    for instance in session.dirty:
+        class_name = instance.__class__.__name__
+        
+        if class_name in MODELS_WITH_UPDATED_AT:
+            if hasattr(instance, 'updated_at'):
+                instance.updated_at = current_time
 
 
 class BudgetConstraint:
@@ -42,6 +63,44 @@ class BudgetConstraint:
 @event.listens_for(Budget, 'before_update')
 def validate_budget(mapper, connection, target):
     BudgetConstraint.validate_budget_amount(mapper, connection, target)
+
+
+class PurchaseRequestBudgetValidator:
+    @staticmethod
+    def check_budget_and_set_flags(mapper, connection, target):
+        if not target.department_id or not target.budget_year:
+            target.is_over_budget = False
+            target.special_approval_required = False
+            return
+        
+        budget = Budget.query.filter_by(
+            department_id=target.department_id,
+            year=target.budget_year,
+            status='active'
+        ).first()
+        
+        if not budget:
+            target.is_over_budget = False
+            target.special_approval_required = False
+            return
+        
+        if target.total_amount > budget.remaining_budget:
+            target.is_over_budget = True
+            target.special_approval_required = True
+        else:
+            target.is_over_budget = False
+            
+            usage_percentage = ((budget.used_budget + target.total_amount) / budget.total_budget) * 100
+            if usage_percentage >= budget.warning_threshold:
+                target.special_approval_required = False
+            else:
+                target.special_approval_required = False
+
+
+@event.listens_for(PurchaseRequest, 'before_insert')
+@event.listens_for(PurchaseRequest, 'before_update')
+def validate_purchase_request_budget(mapper, connection, target):
+    PurchaseRequestBudgetValidator.check_budget_and_set_flags(mapper, connection, target)
 
 
 class User(UserMixin, db.Model):
@@ -131,11 +190,11 @@ class Asset(db.Model):
     status = db.Column(db.String(20), default='in_stock', nullable=False)
     description = db.Column(db.Text)
     qr_code = db.Column(db.String(256))
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False)
+    updated_at = db.Column(db.DateTime, nullable=False)
     
     __table_args__ = (
-        CheckConstraint(f"status IN ({','.join([':' + s for s in VALID_STATUSES])})", 
+        CheckConstraint(f"status IN ('in_stock', 'in_use', 'maintenance', 'disposed')", 
                        name='ck_asset_status'),
         CheckConstraint('quantity >= 0', name='ck_asset_quantity'),
         CheckConstraint('unit_price >= 0', name='ck_asset_unit_price'),
@@ -179,7 +238,7 @@ class AssetStatusLog(db.Model):
     previous_status = db.Column(db.String(20))
     description = db.Column(db.Text)
     operator_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False)
     
     def __repr__(self):
         return f'<AssetStatusLog {self.asset_id}: {self.previous_status} -> {self.status}>'
@@ -192,20 +251,20 @@ class PurchaseRequest(db.Model):
     
     id = db.Column(db.Integer, primary_key=True)
     request_no = db.Column(db.String(64), unique=True, index=True, nullable=False)
-    department_id = db.Column(db.Integer, db.ForeignKey('department.id'))
+    department_id = db.Column(db.Integer, db.ForeignKey('department.id'), nullable=False)
     requester_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     title = db.Column(db.String(128), nullable=False)
     description = db.Column(db.Text)
     total_amount = db.Column(db.Float, default=0.0, nullable=False)
-    budget_year = db.Column(db.Integer)
+    budget_year = db.Column(db.Integer, nullable=False)
     status = db.Column(db.String(20), default='pending', nullable=False)
     is_over_budget = db.Column(db.Boolean, default=False, nullable=False)
     special_approval_required = db.Column(db.Boolean, default=False, nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False)
+    updated_at = db.Column(db.DateTime, nullable=False)
     
     __table_args__ = (
-        CheckConstraint(f"status IN ({','.join([':' + s for s in VALID_STATUSES])})", 
+        CheckConstraint(f"status IN ('pending', 'approved', 'rejected', 'completed')", 
                        name='ck_purchase_request_status'),
         CheckConstraint('total_amount >= 0', name='ck_purchase_request_amount'),
     )
@@ -221,8 +280,42 @@ class PurchaseRequest(db.Model):
             raise ValueError(f'无效的状态: {status}')
         return status
     
+    def check_budget_available(self):
+        if not self.department_id or not self.budget_year:
+            return True
+        
+        budget = Budget.query.filter_by(
+            department_id=self.department_id,
+            year=self.budget_year,
+            status='active'
+        ).first()
+        
+        if not budget:
+            return True
+        
+        return budget.remaining_budget >= self.total_amount
+    
+    def get_remaining_budget(self):
+        if not self.department_id or not self.budget_year:
+            return None
+        
+        budget = Budget.query.filter_by(
+            department_id=self.department_id,
+            year=self.budget_year,
+            status='active'
+        ).first()
+        
+        return budget.remaining_budget if budget else None
+    
     def __repr__(self):
         return f'<PurchaseRequest {self.request_no}>'
+
+
+@event.listens_for(PurchaseRequestItem, 'before_insert')
+@event.listens_for(PurchaseRequestItem, 'before_update')
+def calculate_item_total_price(mapper, connection, target):
+    if target.quantity is not None and target.unit_price is not None:
+        target.total_price = target.quantity * target.unit_price
 
 
 class PurchaseRequestItem(db.Model):
@@ -239,7 +332,7 @@ class PurchaseRequestItem(db.Model):
     unit_price = db.Column(db.Float, default=0.0, nullable=False)
     total_price = db.Column(db.Float, default=0.0, nullable=False)
     description = db.Column(db.Text)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False)
     
     __table_args__ = (
         CheckConstraint('quantity >= 0', name='ck_pri_quantity'),
@@ -257,13 +350,6 @@ class PurchaseRequestItem(db.Model):
         return f'<PurchaseRequestItem {self.name}>'
 
 
-@event.listens_for(PurchaseRequestItem, 'before_insert')
-@event.listens_for(PurchaseRequestItem, 'before_update')
-def calculate_item_total_price(mapper, connection, target):
-    if target.quantity is not None and target.unit_price is not None:
-        target.total_price = target.quantity * target.unit_price
-
-
 class AssetEntry(db.Model):
     __tablename__ = 'asset_entry'
     
@@ -275,7 +361,7 @@ class AssetEntry(db.Model):
     total_items = db.Column(db.Integer, default=0, nullable=False)
     total_value = db.Column(db.Float, default=0.0, nullable=False)
     description = db.Column(db.Text)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False)
     
     __table_args__ = (
         CheckConstraint('total_items >= 0', name='ck_asset_entry_items'),
@@ -299,7 +385,7 @@ class AssetEntryItem(db.Model):
     unit_price = db.Column(db.Float, default=0.0, nullable=False)
     total_price = db.Column(db.Float, default=0.0, nullable=False)
     description = db.Column(db.Text)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False)
     
     __table_args__ = (
         CheckConstraint('quantity >= 0', name='ck_aei_quantity'),
@@ -328,13 +414,13 @@ class AssetBorrow(db.Model):
     status = db.Column(db.String(20), default='pending', nullable=False)
     borrow_date = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
     description = db.Column(db.Text)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False)
+    updated_at = db.Column(db.DateTime, nullable=False)
     
     __table_args__ = (
-        CheckConstraint(f"status IN ({','.join([':' + s for s in VALID_STATUSES])})", 
+        CheckConstraint(f"status IN ('pending', 'approved', 'borrowed', 'returned', 'rejected')", 
                        name='ck_asset_borrow_status'),
-        CheckConstraint(f"borrow_type IN ({','.join([':' + s for s in VALID_TYPES])})", 
+        CheckConstraint(f"borrow_type IN ('borrow', 'use')", 
                        name='ck_asset_borrow_type'),
     )
     
@@ -374,13 +460,13 @@ class AssetDisposal(db.Model):
     status = db.Column(db.String(20), default='pending', nullable=False)
     disposal_date = db.Column(db.DateTime)
     description = db.Column(db.Text)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False)
+    updated_at = db.Column(db.DateTime, nullable=False)
     
     __table_args__ = (
-        CheckConstraint(f"status IN ({','.join([':' + s for s in VALID_STATUSES])})", 
+        CheckConstraint(f"status IN ('pending', 'approved', 'rejected', 'completed')", 
                        name='ck_asset_disposal_status'),
-        CheckConstraint(f"disposal_type IN ({','.join([':' + s for s in VALID_TYPES])})", 
+        CheckConstraint(f"disposal_type IN ('scrap', 'sell', 'donate', 'lost')", 
                        name='ck_asset_disposal_type'),
         CheckConstraint('estimated_value >= 0', name='ck_disposal_estimated_value'),
         CheckConstraint('actual_value >= 0', name='ck_disposal_actual_value'),
@@ -407,12 +493,11 @@ class Budget(db.Model):
     warning_threshold = db.Column(db.Float, default=80.0, nullable=False)
     status = db.Column(db.String(20), default='active', nullable=False)
     description = db.Column(db.Text)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False)
+    updated_at = db.Column(db.DateTime, nullable=False)
     
     __table_args__ = (
-        CheckConstraint(f"status IN ({','.join([':' + s for s in VALID_STATUSES])})", 
-                       name='ck_budget_status'),
+        CheckConstraint(f"status IN ('active', 'closed')", name='ck_budget_status'),
         CheckConstraint('total_budget >= 0', name='ck_budget_total'),
         CheckConstraint('used_budget >= 0', name='ck_budget_used'),
         CheckConstraint('remaining_budget >= 0', name='ck_budget_remaining'),
@@ -501,10 +586,10 @@ class BudgetUsageLog(db.Model):
     related_request_id = db.Column(db.Integer, db.ForeignKey('purchase_request.id'))
     description = db.Column(db.Text)
     operator_id = db.Column(db.Integer, db.ForeignKey('user.id'))
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False)
     
     __table_args__ = (
-        CheckConstraint(f"usage_type IN ({','.join([':' + s for s in VALID_TYPES])})", 
+        CheckConstraint(f"usage_type IN ('purchase', 'adjustment')", 
                        name='ck_budget_usage_type'),
     )
     
@@ -532,13 +617,13 @@ class Inventory(db.Model):
     profit_assets = db.Column(db.Integer, default=0, nullable=False)
     loss_assets = db.Column(db.Integer, default=0, nullable=False)
     description = db.Column(db.Text)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False)
+    updated_at = db.Column(db.DateTime, nullable=False)
     
     __table_args__ = (
-        CheckConstraint(f"status IN ({','.join([':' + s for s in VALID_STATUSES])})", 
+        CheckConstraint(f"status IN ('pending', 'in_progress', 'completed')", 
                        name='ck_inventory_status'),
-        CheckConstraint(f"inventory_type IN ({','.join([':' + s for s in VALID_TYPES])})", 
+        CheckConstraint(f"inventory_type IN ('annual', 'quarterly', 'temporary')", 
                        name='ck_inventory_type'),
         CheckConstraint('total_assets >= 0', name='ck_inventory_total'),
         CheckConstraint('inventoried_assets >= 0', name='ck_inventory_inventoried'),
@@ -571,10 +656,10 @@ class InventoryItem(db.Model):
     inventory_date = db.Column(db.DateTime)
     inventory_by = db.Column(db.Integer, db.ForeignKey('user.id'))
     remark = db.Column(db.Text)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False)
     
     __table_args__ = (
-        CheckConstraint(f"inventory_result IN ({','.join([':' + s for s in VALID_RESULTS])})", 
+        CheckConstraint(f"inventory_result IN ('pending', 'normal', 'profit', 'loss', 'discrepancy')", 
                        name='ck_inventory_item_result'),
         CheckConstraint('expected_quantity >= 0', name='ck_ii_expected_qty'),
         CheckConstraint('actual_quantity >= 0', name='ck_ii_actual_qty'),
@@ -603,13 +688,13 @@ class Maintenance(db.Model):
     status = db.Column(db.String(20), default='scheduled', nullable=False)
     next_maintenance_date = db.Column(db.DateTime)
     remark = db.Column(db.Text)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False)
+    updated_at = db.Column(db.DateTime, nullable=False)
     
     __table_args__ = (
-        CheckConstraint(f"status IN ({','.join([':' + s for s in VALID_STATUSES])})", 
+        CheckConstraint(f"status IN ('scheduled', 'in_progress', 'completed', 'cancelled')", 
                        name='ck_maintenance_status'),
-        CheckConstraint(f"maintenance_type IN ({','.join([':' + s for s in VALID_TYPES])})", 
+        CheckConstraint(f"maintenance_type IN ('repair', 'maintenance', 'inspection')", 
                        name='ck_maintenance_type'),
         CheckConstraint('duration >= 0', name='ck_maintenance_duration'),
         CheckConstraint('cost >= 0', name='ck_maintenance_cost'),
@@ -635,13 +720,13 @@ class MaintenancePlan(db.Model):
     duration = db.Column(db.Float, default=0.0, nullable=False)
     description = db.Column(db.Text)
     is_active = db.Column(db.Boolean, default=True, nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False)
+    updated_at = db.Column(db.DateTime, nullable=False)
     
     __table_args__ = (
-        CheckConstraint(f"plan_type IN ({','.join([':' + s for s in VALID_PLAN_TYPES])})", 
+        CheckConstraint(f"plan_type IN ('category', 'specific')", 
                        name='ck_maintenance_plan_type'),
-        CheckConstraint(f"maintenance_type IN ({','.join([':' + s for s in VALID_MAINTENANCE_TYPES])})", 
+        CheckConstraint(f"maintenance_type IN ('repair', 'maintenance', 'inspection')", 
                        name='ck_mp_maintenance_type'),
         CheckConstraint('interval_days > 0 OR interval_days IS NULL', 
                        name='ck_mp_interval_days'),
@@ -671,13 +756,13 @@ class Approval(db.Model):
     approval_date = db.Column(db.DateTime)
     level = db.Column(db.Integer, default=1, nullable=False)
     is_final = db.Column(db.Boolean, default=False, nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False)
+    updated_at = db.Column(db.DateTime, nullable=False)
     
     __table_args__ = (
-        CheckConstraint(f"status IN ({','.join([':' + s for s in VALID_STATUSES])})", 
+        CheckConstraint(f"status IN ('pending', 'approved', 'rejected')", 
                        name='ck_approval_status'),
-        CheckConstraint(f"approval_type IN ({','.join([':' + s for s in VALID_TYPES])})", 
+        CheckConstraint(f"approval_type IN ('purchase', 'borrow', 'disposal', 'transfer')", 
                        name='ck_approval_type'),
         CheckConstraint('level >= 1', name='ck_approval_level'),
     )
@@ -694,8 +779,8 @@ class AssetTransfer(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     transfer_no = db.Column(db.String(64), unique=True, index=True, nullable=False)
     asset_id = db.Column(db.Integer, db.ForeignKey('asset.id'), nullable=False)
-    from_department_id = db.Column(db.Integer, db.ForeignKey('department.id'))
-    to_department_id = db.Column(db.Integer, db.ForeignKey('department.id'))
+    from_department_id = db.Column(db.Integer, db.ForeignKey('department.id'), nullable=False)
+    to_department_id = db.Column(db.Integer, db.ForeignKey('department.id'), nullable=False)
     from_user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
     to_user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
     applicant_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
@@ -703,11 +788,11 @@ class AssetTransfer(db.Model):
     status = db.Column(db.String(20), default='pending', nullable=False)
     transfer_date = db.Column(db.DateTime)
     description = db.Column(db.Text)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False)
+    updated_at = db.Column(db.DateTime, nullable=False)
     
     __table_args__ = (
-        CheckConstraint(f"status IN ({','.join([':' + s for s in VALID_STATUSES])})", 
+        CheckConstraint(f"status IN ('pending', 'approved', 'rejected', 'completed')", 
                        name='ck_asset_transfer_status'),
     )
     
@@ -735,12 +820,12 @@ class Notification(db.Model):
     send_method = db.Column(db.String(20), default='system', nullable=False)
     sent_at = db.Column(db.DateTime)
     read_at = db.Column(db.DateTime)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False)
     
     __table_args__ = (
-        CheckConstraint(f"notification_type IN ({','.join([':' + s for s in VALID_TYPES])})", 
+        CheckConstraint(f"notification_type IN ('maintenance_reminder', 'borrow_return', 'approval', 'budget_warning', 'system')", 
                        name='ck_notification_type'),
-        CheckConstraint(f"send_method IN ({','.join([':' + s for s in VALID_METHODS])})", 
+        CheckConstraint(f"send_method IN ('system', 'wechat', 'sms', 'email')", 
                        name='ck_notification_method'),
     )
     
