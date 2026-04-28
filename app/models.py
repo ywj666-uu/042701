@@ -26,59 +26,12 @@ MODELS_WITH_CREATED_AT = [
 def before_flush_handler(session, flush_context, instances):
     current_time = datetime.utcnow()
     
-    for instance in session.new:
-        class_name = instance.__class__.__name__
-        
-        if class_name in MODELS_WITH_CREATED_AT:
-            if hasattr(instance, 'created_at') and instance.created_at is None:
-                instance.created_at = current_time
-        
-        if class_name in MODELS_WITH_UPDATED_AT:
-            if hasattr(instance, 'updated_at'):
-                instance.updated_at = current_time
-        
-        if class_name == 'PurchaseRequest':
-            validate_purchase_request_budget_before_flush(instance)
-    
     for instance in session.dirty:
         class_name = instance.__class__.__name__
         
         if class_name in MODELS_WITH_UPDATED_AT:
             if hasattr(instance, 'updated_at'):
                 instance.updated_at = current_time
-        
-        if class_name == 'PurchaseRequest':
-            validate_purchase_request_budget_before_flush(instance)
-
-
-def validate_purchase_request_budget_before_flush(purchase_request):
-    if not purchase_request.department_id or not purchase_request.budget_year:
-        purchase_request.is_over_budget = False
-        purchase_request.special_approval_required = False
-        return
-    
-    budget = db.session.query(Budget).filter_by(
-        department_id=purchase_request.department_id,
-        year=purchase_request.budget_year,
-        status='active'
-    ).first()
-    
-    if not budget:
-        purchase_request.is_over_budget = False
-        purchase_request.special_approval_required = False
-        return
-    
-    if purchase_request.total_amount > budget.remaining_budget:
-        purchase_request.is_over_budget = True
-        purchase_request.special_approval_required = True
-    else:
-        purchase_request.is_over_budget = False
-        
-        usage_percentage = ((budget.used_budget + purchase_request.total_amount) / budget.total_budget) * 100
-        if usage_percentage >= budget.warning_threshold:
-            purchase_request.special_approval_required = False
-        else:
-            purchase_request.special_approval_required = False
 
 
 class BudgetConstraint:
@@ -1065,16 +1018,6 @@ class QRCodeRecord(db.Model):
     
     def __repr__(self):
         return f'<QRCodeRecord {self.id} - {self.asset_id}>'
-
-
-@event.listens_for(PurchaseRequest, 'before_insert')
-@event.listens_for(PurchaseRequest, 'before_update')
-def update_purchase_supplier_stats(mapper, connection, target):
-    if target.supplier_id and target.status == 'approved':
-        supplier = Supplier.query.get(target.supplier_id)
-        if supplier:
-            supplier.total_orders = (supplier.total_orders or 0) + 1
-            supplier.total_amount = (supplier.total_amount or 0) + target.total_amount
 
 
 @login_manager.user_loader
