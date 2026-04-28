@@ -9,14 +9,16 @@ from app import db, login_manager
 MODELS_WITH_UPDATED_AT = [
     'Asset', 'PurchaseRequest', 'AssetBorrow', 'AssetDisposal',
     'Budget', 'Inventory', 'Maintenance', 'MaintenancePlan',
-    'Approval', 'AssetTransfer'
+    'Approval', 'AssetTransfer', 'Supplier', 'SupplierEvaluation',
+    'InventoryResult', 'QRCodeRecord'
 ]
 
 MODELS_WITH_CREATED_AT = [
     'User', 'Department', 'Asset', 'AssetStatusLog', 'PurchaseRequest',
     'PurchaseRequestItem', 'AssetEntry', 'AssetEntryItem', 'AssetBorrow',
     'AssetDisposal', 'Budget', 'BudgetUsageLog', 'Inventory', 'InventoryItem',
-    'Maintenance', 'MaintenancePlan', 'Approval', 'AssetTransfer', 'Notification'
+    'Maintenance', 'MaintenancePlan', 'Approval', 'AssetTransfer', 'Notification',
+    'Supplier', 'SupplierEvaluation', 'InventoryResult', 'QRCodeRecord'
 ]
 
 
@@ -253,6 +255,7 @@ class PurchaseRequest(db.Model):
     request_no = db.Column(db.String(64), unique=True, index=True, nullable=False)
     department_id = db.Column(db.Integer, db.ForeignKey('department.id'), nullable=False)
     requester_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    supplier_id = db.Column(db.Integer, db.ForeignKey('supplier.id'))
     title = db.Column(db.String(128), nullable=False)
     description = db.Column(db.Text)
     total_amount = db.Column(db.Float, default=0.0, nullable=False)
@@ -836,6 +839,241 @@ class Notification(db.Model):
     
     def __repr__(self):
         return f'<Notification {self.user_id}: {self.title}>'
+
+
+class Supplier(db.Model):
+    __tablename__ = 'supplier'
+    
+    VALID_STATUSES = ['active', 'inactive', 'blacklisted']
+    
+    id = db.Column(db.Integer, primary_key=True)
+    supplier_code = db.Column(db.String(64), unique=True, index=True, nullable=False)
+    name = db.Column(db.String(128), nullable=False)
+    short_name = db.Column(db.String(64))
+    contact_person = db.Column(db.String(64))
+    contact_phone = db.Column(db.String(32))
+    contact_email = db.Column(db.String(120))
+    address = db.Column(db.String(256))
+    tax_id = db.Column(db.String(64))
+    bank_name = db.Column(db.String(128))
+    bank_account = db.Column(db.String(64))
+    
+    qualification_level = db.Column(db.String(20), default='general')
+    business_scope = db.Column(db.Text)
+    qualification_certificates = db.Column(db.Text)
+    cooperation_start_date = db.Column(db.DateTime)
+    status = db.Column(db.String(20), default='active', nullable=False)
+    
+    rating = db.Column(db.Float, default=5.0)
+    total_orders = db.Column(db.Integer, default=0)
+    total_amount = db.Column(db.Float, default=0.0)
+    
+    description = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, nullable=False)
+    updated_at = db.Column(db.DateTime, nullable=False)
+    
+    __table_args__ = (
+        CheckConstraint(f"status IN ('active', 'inactive', 'blacklisted')", 
+                       name='ck_supplier_status'),
+        CheckConstraint('rating >= 0 AND rating <= 5', name='ck_supplier_rating'),
+        CheckConstraint('total_orders >= 0', name='ck_supplier_total_orders'),
+        CheckConstraint('total_amount >= 0', name='ck_supplier_total_amount'),
+    )
+    
+    evaluations = db.relationship('SupplierEvaluation', backref='supplier', lazy='dynamic',
+                                   cascade='all, delete-orphan')
+    purchase_requests = db.relationship('PurchaseRequest', backref='supplier', lazy='dynamic')
+    
+    @validates('rating')
+    def validate_rating(self, key, value):
+        if value < 0 or value > 5:
+            raise ValueError('评分必须在0-5之间')
+        return value
+    
+    def __repr__(self):
+        return f'<Supplier {self.supplier_code} - {self.name}>'
+
+
+class SupplierEvaluation(db.Model):
+    __tablename__ = 'supplier_evaluation'
+    
+    VALID_TYPES = ['delivery', 'quality', 'service', 'comprehensive']
+    
+    id = db.Column(db.Integer, primary_key=True)
+    supplier_id = db.Column(db.Integer, db.ForeignKey('supplier.id'), nullable=False)
+    purchase_request_id = db.Column(db.Integer, db.ForeignKey('purchase_request.id'))
+    evaluator_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    
+    evaluation_type = db.Column(db.String(20), default='comprehensive', nullable=False)
+    quality_rating = db.Column(db.Float, default=5.0)
+    delivery_rating = db.Column(db.Float, default=5.0)
+    price_rating = db.Column(db.Float, default=5.0)
+    service_rating = db.Column(db.Float, default=5.0)
+    overall_rating = db.Column(db.Float, default=5.0)
+    
+    comment = db.Column(db.Text)
+    evaluation_date = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    created_at = db.Column(db.DateTime, nullable=False)
+    updated_at = db.Column(db.DateTime, nullable=False)
+    
+    __table_args__ = (
+        CheckConstraint(f"evaluation_type IN ('delivery', 'quality', 'service', 'comprehensive')", 
+                       name='ck_supplier_eval_type'),
+        CheckConstraint('quality_rating >= 0 AND quality_rating <= 5', name='ck_eval_quality_rating'),
+        CheckConstraint('delivery_rating >= 0 AND delivery_rating <= 5', name='ck_eval_delivery_rating'),
+        CheckConstraint('price_rating >= 0 AND price_rating <= 5', name='ck_eval_price_rating'),
+        CheckConstraint('service_rating >= 0 AND service_rating <= 5', name='ck_eval_service_rating'),
+        CheckConstraint('overall_rating >= 0 AND overall_rating <= 5', name='ck_eval_overall_rating'),
+    )
+    
+    @validates('quality_rating', 'delivery_rating', 'price_rating', 'service_rating', 'overall_rating')
+    def validate_rating(self, key, value):
+        if value < 0 or value > 5:
+            raise ValueError('评分必须在0-5之间')
+        return value
+    
+    def calculate_overall_rating(self):
+        ratings = [self.quality_rating, self.delivery_rating, self.price_rating, self.service_rating]
+        valid_ratings = [r for r in ratings if r is not None]
+        if valid_ratings:
+            self.overall_rating = sum(valid_ratings) / len(valid_ratings)
+        return self.overall_rating
+    
+    def __repr__(self):
+        return f'<SupplierEvaluation {self.supplier_id} - {self.overall_rating}>'
+
+
+class InventoryResult(db.Model):
+    __tablename__ = 'inventory_result'
+    
+    VALID_TYPES = ['profit', 'loss', 'adjustment']
+    VALID_STATUSES = ['pending', 'approved', 'rejected', 'completed']
+    
+    id = db.Column(db.Integer, primary_key=True)
+    result_no = db.Column(db.String(64), unique=True, index=True, nullable=False)
+    inventory_id = db.Column(db.Integer, db.ForeignKey('inventory.id'), nullable=False)
+    inventory_item_id = db.Column(db.Integer, db.ForeignKey('inventory_item.id'), nullable=False)
+    asset_id = db.Column(db.Integer, db.ForeignKey('asset.id'), nullable=False)
+    
+    result_type = db.Column(db.String(20), nullable=False)
+    expected_quantity = db.Column(db.Integer, nullable=False)
+    actual_quantity = db.Column(db.Integer, nullable=False)
+    difference_quantity = db.Column(db.Integer, nullable=False)
+    unit_price = db.Column(db.Float, default=0.0)
+    total_amount = db.Column(db.Float, default=0.0)
+    
+    reason = db.Column(db.Text)
+    suggestion = db.Column(db.Text)
+    
+    status = db.Column(db.String(20), default='pending', nullable=False)
+    approver_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    approval_comment = db.Column(db.Text)
+    approval_date = db.Column(db.DateTime)
+    
+    handler_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    handle_date = db.Column(db.DateTime)
+    handle_remark = db.Column(db.Text)
+    
+    created_at = db.Column(db.DateTime, nullable=False)
+    updated_at = db.Column(db.DateTime, nullable=False)
+    
+    __table_args__ = (
+        CheckConstraint(f"result_type IN ('profit', 'loss', 'adjustment')", 
+                       name='ck_inventory_result_type'),
+        CheckConstraint(f"status IN ('pending', 'approved', 'rejected', 'completed')", 
+                       name='ck_inventory_result_status'),
+        CheckConstraint('total_amount >= 0', name='ck_inventory_result_amount'),
+    )
+    
+    inventory = db.relationship('Inventory', backref='results')
+    inventory_item = db.relationship('InventoryItem', backref='result')
+    asset = db.relationship('Asset', backref='inventory_results')
+    
+    @validates('result_type')
+    def validate_result_type(self, key, value):
+        valid_types = ['profit', 'loss', 'adjustment']
+        if value not in valid_types:
+            raise ValueError(f'无效的结果类型: {value}。有效类型: {valid_types}')
+        return value
+    
+    def calculate_amount(self):
+        if self.unit_price and self.difference_quantity:
+            self.total_amount = abs(self.difference_quantity) * self.unit_price
+        return self.total_amount
+    
+    def __repr__(self):
+        return f'<InventoryResult {self.result_no} - {self.result_type}>'
+
+
+class QRCodeRecord(db.Model):
+    __tablename__ = 'qr_code_record'
+    
+    VALID_TYPES = ['asset_detail', 'borrow', 'return', 'inventory', 'maintenance']
+    VALID_STATUSES = ['active', 'used', 'expired']
+    
+    id = db.Column(db.Integer, primary_key=True)
+    qr_code = db.Column(db.String(256), unique=True, index=True, nullable=False)
+    asset_id = db.Column(db.Integer, db.ForeignKey('asset.id'), nullable=False)
+    
+    qr_type = db.Column(db.String(20), default='asset_detail', nullable=False)
+    qr_content = db.Column(db.Text, nullable=False)
+    qr_image_path = db.Column(db.String(256))
+    
+    scan_count = db.Column(db.Integer, default=0)
+    last_scan_at = db.Column(db.DateTime)
+    
+    valid_from = db.Column(db.DateTime)
+    valid_until = db.Column(db.DateTime)
+    status = db.Column(db.String(20), default='active', nullable=False)
+    
+    created_at = db.Column(db.DateTime, nullable=False)
+    updated_at = db.Column(db.DateTime, nullable=False)
+    
+    __table_args__ = (
+        CheckConstraint(f"qr_type IN ('asset_detail', 'borrow', 'return', 'inventory', 'maintenance')", 
+                       name='ck_qr_code_type'),
+        CheckConstraint(f"status IN ('active', 'used', 'expired')", 
+                       name='ck_qr_code_status'),
+        CheckConstraint('scan_count >= 0', name='ck_qr_scan_count'),
+    )
+    
+    asset = db.relationship('Asset', backref='qr_codes')
+    
+    @validates('qr_type')
+    def validate_qr_type(self, key, value):
+        valid_types = ['asset_detail', 'borrow', 'return', 'inventory', 'maintenance']
+        if value not in valid_types:
+            raise ValueError(f'无效的二维码类型: {value}。有效类型: {valid_types}')
+        return value
+    
+    def is_valid(self):
+        if self.status != 'active':
+            return False
+        now = datetime.utcnow()
+        if self.valid_from and now < self.valid_from:
+            return False
+        if self.valid_until and now > self.valid_until:
+            return False
+        return True
+    
+    def record_scan(self):
+        self.scan_count += 1
+        self.last_scan_at = datetime.utcnow()
+        return self.scan_count
+    
+    def __repr__(self):
+        return f'<QRCodeRecord {self.id} - {self.asset_id}>'
+
+
+@event.listens_for(PurchaseRequest, 'before_insert')
+@event.listens_for(PurchaseRequest, 'before_update')
+def update_purchase_supplier_stats(mapper, connection, target):
+    if target.supplier_id and target.status == 'approved':
+        supplier = Supplier.query.get(target.supplier_id)
+        if supplier:
+            supplier.total_orders = (supplier.total_orders or 0) + 1
+            supplier.total_amount = (supplier.total_amount or 0) + target.total_amount
 
 
 @login_manager.user_loader

@@ -45,4 +45,10 @@ def create_app(config_name='default'):
     from .notification import notification as notification_blueprint
     app.register_blueprint(notification_blueprint, url_prefix='/notification')
     
+    from .supplier import supplier as supplier_blueprint
+    app.register_blueprint(supplier_blueprint, url_prefix='/supplier')
+    
+    from .dashboard import dashboard as dashboard_blueprint
+    app.register_blueprint(dashboard_blueprint, url_prefix='/dashboard')
+    
     return app
