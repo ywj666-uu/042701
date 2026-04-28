@@ -1,0 +1,14 @@
+Flask==2.3.3
+Flask-SQLAlchemy==3.0.5
+Flask-Login==0.6.2
+Flask-WTF==1.1.1
+Flask-RESTful==0.3.10
+Flask-Mail==0.9.1
+APScheduler==3.10.1
+SQLAlchemy==2.0.19
+Werkzeug==2.3.7
+python-dateutil==2.8.2
+marshmallow==3.20.1
+qrcode==7.4
+Pillow==10.0.0
+requests==2.31.0
