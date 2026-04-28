@@ -23,7 +23,7 @@ MODELS_WITH_CREATED_AT = [
 
 
 @event.listens_for(db.session, 'before_flush')
-def update_timestamps(session, flush_context, instances):
+def before_flush_handler(session, flush_context, instances):
     current_time = datetime.utcnow()
     
     for instance in session.new:
@@ -36,6 +36,9 @@ def update_timestamps(session, flush_context, instances):
         if class_name in MODELS_WITH_UPDATED_AT:
             if hasattr(instance, 'updated_at'):
                 instance.updated_at = current_time
+        
+        if class_name == 'PurchaseRequest':
+            validate_purchase_request_budget_before_flush(instance)
     
     for instance in session.dirty:
         class_name = instance.__class__.__name__
@@ -43,6 +46,39 @@ def update_timestamps(session, flush_context, instances):
         if class_name in MODELS_WITH_UPDATED_AT:
             if hasattr(instance, 'updated_at'):
                 instance.updated_at = current_time
+        
+        if class_name == 'PurchaseRequest':
+            validate_purchase_request_budget_before_flush(instance)
+
+
+def validate_purchase_request_budget_before_flush(purchase_request):
+    if not purchase_request.department_id or not purchase_request.budget_year:
+        purchase_request.is_over_budget = False
+        purchase_request.special_approval_required = False
+        return
+    
+    budget = db.session.query(Budget).filter_by(
+        department_id=purchase_request.department_id,
+        year=purchase_request.budget_year,
+        status='active'
+    ).first()
+    
+    if not budget:
+        purchase_request.is_over_budget = False
+        purchase_request.special_approval_required = False
+        return
+    
+    if purchase_request.total_amount > budget.remaining_budget:
+        purchase_request.is_over_budget = True
+        purchase_request.special_approval_required = True
+    else:
+        purchase_request.is_over_budget = False
+        
+        usage_percentage = ((budget.used_budget + purchase_request.total_amount) / budget.total_budget) * 100
+        if usage_percentage >= budget.warning_threshold:
+            purchase_request.special_approval_required = False
+        else:
+            purchase_request.special_approval_required = False
 
 
 class BudgetConstraint:
@@ -67,42 +103,7 @@ def validate_budget(mapper, connection, target):
     BudgetConstraint.validate_budget_amount(mapper, connection, target)
 
 
-class PurchaseRequestBudgetValidator:
-    @staticmethod
-    def check_budget_and_set_flags(mapper, connection, target):
-        if not target.department_id or not target.budget_year:
-            target.is_over_budget = False
-            target.special_approval_required = False
-            return
-        
-        budget = Budget.query.filter_by(
-            department_id=target.department_id,
-            year=target.budget_year,
-            status='active'
-        ).first()
-        
-        if not budget:
-            target.is_over_budget = False
-            target.special_approval_required = False
-            return
-        
-        if target.total_amount > budget.remaining_budget:
-            target.is_over_budget = True
-            target.special_approval_required = True
-        else:
-            target.is_over_budget = False
-            
-            usage_percentage = ((budget.used_budget + target.total_amount) / budget.total_budget) * 100
-            if usage_percentage >= budget.warning_threshold:
-                target.special_approval_required = False
-            else:
-                target.special_approval_required = False
 
-
-@event.listens_for(PurchaseRequest, 'before_insert')
-@event.listens_for(PurchaseRequest, 'before_update')
-def validate_purchase_request_budget(mapper, connection, target):
-    PurchaseRequestBudgetValidator.check_budget_and_set_flags(mapper, connection, target)
 
 
 class User(UserMixin, db.Model):
