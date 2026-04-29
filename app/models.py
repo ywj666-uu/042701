@@ -1,4 +1,6 @@
 from datetime import datetime
+import json
+from typing import Tuple, Dict, Any
 from flask_login import UserMixin
 from werkzeug.security import generate_password_hash, check_password_hash
 from sqlalchemy import CheckConstraint, event
@@ -1494,6 +1496,9 @@ class MatchingConfig(db.Model):
     
     auto_approve_threshold = db.Column(db.Float, default=0.9)
     
+    condition_values_json = db.Column(db.Text)
+    urgency_values_json = db.Column(db.Text)
+    
     is_active = db.Column(db.Boolean, default=True, nullable=False)
     priority = db.Column(db.Integer, default=0)
     
@@ -1532,6 +1537,49 @@ class MatchingConfig(db.Model):
             'quantity': self.quantity_weight,
             'urgency': self.urgency_weight,
             'tag': self.tag_weight
+        }
+    
+    def get_condition_values(self) -> Dict[str, float]:
+        if self.condition_values_json:
+            try:
+                return json.loads(self.condition_values_json)
+            except:
+                pass
+        return {
+            'excellent': 1.0,
+            'good': 0.8,
+            'fair': 0.5,
+            'poor': 0.2
+        }
+    
+    def set_condition_values(self, values: Dict[str, float]):
+        self.condition_values_json = json.dumps(values, ensure_ascii=False)
+    
+    def get_urgency_values(self) -> Dict[str, float]:
+        if self.urgency_values_json:
+            try:
+                return json.loads(self.urgency_values_json)
+            except:
+                pass
+        return {
+            'low': 0.25,
+            'medium': 0.5,
+            'high': 0.75,
+            'critical': 1.0
+        }
+    
+    def set_urgency_values(self, values: Dict[str, float]):
+        self.urgency_values_json = json.dumps(values, ensure_ascii=False)
+    
+    def get_full_config(self) -> Dict[str, Any]:
+        return {
+            'weights': self.get_weights(),
+            'condition_values': self.get_condition_values(),
+            'urgency_values': self.get_urgency_values(),
+            'min_match_score': self.min_match_score,
+            'max_matches_per_listing': self.max_matches_per_listing,
+            'max_matches_per_request': self.max_matches_per_request,
+            'auto_approve_threshold': self.auto_approve_threshold
         }
     
     def validate_weights(self) -> Tuple[bool, str]:

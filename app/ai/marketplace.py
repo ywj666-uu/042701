@@ -73,22 +73,7 @@ class MatchResult:
 class MatchingAlgorithm:
     def __init__(self, config: Optional[MatchingConfig] = None):
         self.config = config or self._get_default_config()
-        
-        self.weights = self.config.get_weights()
-        
-        self.condition_values = {
-            'excellent': 1.0,
-            'good': 0.8,
-            'fair': 0.5,
-            'poor': 0.2
-        }
-        
-        self.urgency_values = {
-            'low': 0.25,
-            'medium': 0.5,
-            'high': 0.75,
-            'critical': 1.0
-        }
+        self._load_config_values()
     
     def _get_default_config(self) -> MatchingConfig:
         default_config = MatchingConfig.query.filter_by(
@@ -120,11 +105,34 @@ class MatchingAlgorithm:
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow()
         )
+        config.set_condition_values({
+            'excellent': 1.0,
+            'good': 0.8,
+            'fair': 0.5,
+            'poor': 0.2
+        })
+        config.set_urgency_values({
+            'low': 0.25,
+            'medium': 0.5,
+            'high': 0.75,
+            'critical': 1.0
+        })
         return config
+    
+    def _load_config_values(self):
+        self.weights = self.config.get_weights()
+        self.condition_values = self.config.get_condition_values()
+        self.urgency_values = self.config.get_urgency_values()
     
     def update_weights(self, config: MatchingConfig):
         self.config = config
-        self.weights = config.get_weights()
+        self._load_config_values()
+    
+    def get_condition_value(self, condition: str) -> float:
+        return self.condition_values.get(condition, 0.5)
+    
+    def get_urgency_value(self, urgency: str) -> float:
+        return self.urgency_values.get(urgency, 0.5)
     
     def get_min_match_score(self) -> float:
         return self.config.min_match_score if self.config else 0.5
@@ -164,11 +172,11 @@ class MatchingAlgorithm:
         if not preferred_conditions:
             return 0.5
         
-        listing_value = self.condition_values.get(listing.condition, 0.5)
+        listing_value = self.get_condition_value(listing.condition)
         
         best_match = 0.0
         for preferred in preferred_conditions:
-            preferred_value = self.condition_values.get(preferred, 0.5)
+            preferred_value = self.get_condition_value(preferred)
             match = 1.0 - abs(listing_value - preferred_value)
             best_match = max(best_match, match)
         
@@ -202,8 +210,8 @@ class MatchingAlgorithm:
             return 0.0
     
     def calculate_urgency_match(self, listing: AssetListing, request: AssetRequest) -> float:
-        listing_urgency = self.urgency_values.get(listing.urgency, 0.5)
-        request_urgency = self.urgency_values.get(request.urgency, 0.5)
+        listing_urgency = self.get_urgency_value(listing.urgency)
+        request_urgency = self.get_urgency_value(request.urgency)
         
         if listing_urgency >= 0.75 or request_urgency >= 0.75:
             return 1.0
@@ -614,134 +622,371 @@ class MarketplaceService:
         listing: AssetListing,
         config_id: Optional[int] = None
     ) -> int:
-        config = None
-        if config_id:
-            config = MatchingConfig.query.get(config_id)
-        
-        if config:
-            self.matching_algorithm.update_weights(config)
-        
-        limit = self.matching_algorithm.get_max_matches_per_listing()
-        
-        matches = self.matching_algorithm.find_matches_for_listing(
-            listing=listing,
-            limit=limit * 2
-        )
-        
-        matches_created = 0
-        
-        for request, score, scores in matches:
-            existing_match = AssetMatch.query.filter_by(
-                listing_id=listing.id,
-                request_id=request.id
-            ).first()
+        try:
+            locked_listing = AssetListing.query.filter_by(
+                id=listing.id,
+                status='active'
+            ).with_for_update(skip_locked=True).first()
             
-            if existing_match:
-                continue
+            if not locked_listing:
+                return 0
             
-            if matches_created >= limit:
-                break
+            if locked_listing.available_quantity <= 0:
+                return 0
             
-            try:
-                match = AssetMatch(
-                    match_no=self._generate_match_no(),
-                    listing_id=listing.id,
-                    request_id=request.id,
-                    overall_score=score,
-                    category_match_score=scores['category'],
-                    condition_match_score=scores['condition'],
-                    value_match_score=scores['value'],
-                    quantity_match_score=scores['quantity'],
-                    urgency_match_score=scores['urgency'],
-                    tag_match_score=scores['tag'],
-                    matched_quantity=min(listing.available_quantity, request.required_quantity),
-                    matched_value=min(listing.available_quantity, request.required_quantity) * listing.suggested_transfer_value,
-                    status='pending',
-                    created_at=datetime.utcnow(),
-                    updated_at=datetime.utcnow()
+            config = None
+            if config_id:
+                config = MatchingConfig.query.get(config_id)
+            
+            if config:
+                self.matching_algorithm.update_weights(config)
+            
+            limit = self.matching_algorithm.get_max_matches_per_listing()
+            min_score = self.matching_algorithm.get_min_match_score()
+            
+            candidate_requests = self._find_candidate_requests_for_listing(
+                listing=locked_listing,
+                limit=limit * 3
+            )
+            
+            matches_created = 0
+            remaining_quantity = locked_listing.available_quantity
+            
+            for request_data in candidate_requests:
+                if matches_created >= limit:
+                    break
+                
+                if remaining_quantity <= 0:
+                    break
+                
+                request_id = request_data['id']
+                request_status = request_data['status']
+                
+                if request_status != 'open':
+                    continue
+                
+                locked_request = AssetRequest.query.filter_by(
+                    id=request_id,
+                    status='open'
+                ).with_for_update(skip_locked=True).first()
+                
+                if not locked_request:
+                    continue
+                
+                if locked_request.required_quantity <= 0:
+                    continue
+                
+                existing_match = AssetMatch.query.filter_by(
+                    listing_id=locked_listing.id,
+                    request_id=locked_request.id
+                ).first()
+                
+                if existing_match:
+                    continue
+                
+                overall_score, scores = self.matching_algorithm.calculate_overall_score(
+                    locked_listing, locked_request
                 )
                 
-                db.session.add(match)
-                matches_created += 1
+                if overall_score < min_score:
+                    continue
                 
-                listing.match_count = (listing.match_count or 0) + 1
-                request.match_count = (request.match_count or 0) + 1
+                matched_quantity = min(remaining_quantity, locked_request.required_quantity)
+                matched_value = matched_quantity * locked_listing.suggested_transfer_value
                 
-            except Exception:
-                db.session.rollback()
-                continue
-        
-        if matches_created > 0:
+                try:
+                    match = AssetMatch(
+                        match_no=self._generate_match_no(),
+                        listing_id=locked_listing.id,
+                        request_id=locked_request.id,
+                        overall_score=overall_score,
+                        category_match_score=scores['category'],
+                        condition_match_score=scores['condition'],
+                        value_match_score=scores['value'],
+                        quantity_match_score=scores['quantity'],
+                        urgency_match_score=scores['urgency'],
+                        tag_match_score=scores['tag'],
+                        matched_quantity=matched_quantity,
+                        matched_value=matched_value,
+                        status='pending',
+                        created_at=datetime.utcnow(),
+                        updated_at=datetime.utcnow()
+                    )
+                    
+                    db.session.add(match)
+                    
+                    locked_listing.match_count = (locked_listing.match_count or 0) + 1
+                    locked_request.match_count = (locked_request.match_count or 0) + 1
+                    
+                    remaining_quantity -= matched_quantity
+                    matches_created += 1
+                    
+                except Exception:
+                    continue
+            
             db.session.commit()
+            return matches_created
+            
+        except Exception as e:
+            db.session.rollback()
+            raise e
+    
+    def _find_candidate_requests_for_listing(
+        self,
+        listing: AssetListing,
+        limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        now = datetime.utcnow()
         
-        return matches_created
+        base_query = db.session.query(
+            AssetRequest.id,
+            AssetRequest.status,
+            AssetRequest.required_category,
+            AssetRequest.required_quantity,
+            AssetRequest.max_budget,
+            AssetRequest.urgency,
+            AssetRequest.preferred_conditions_json,
+            AssetRequest.tags_json,
+            AssetRequest.expires_at
+        ).filter(
+            AssetRequest.status == 'open',
+            AssetRequest.requester_department_id != listing.owner_department_id,
+            db.or_(
+                AssetRequest.expires_at.is_(None),
+                AssetRequest.expires_at > now
+            )
+        )
+        
+        if listing.category:
+            base_query = base_query.filter(
+                db.or_(
+                    AssetRequest.required_category == listing.category,
+                    AssetRequest.required_category.like(f'%{listing.category}%'),
+                    AssetRequest.required_category.is_(None)
+                )
+            )
+        
+        if listing.suggested_transfer_value > 0:
+            base_query = base_query.filter(
+                db.or_(
+                    AssetRequest.max_budget.is_(None),
+                    AssetRequest.max_budget >= listing.suggested_transfer_value
+                )
+            )
+        
+        base_query = base_query.order_by(
+            db.case(
+                (AssetRequest.urgency == 'critical', 1),
+                (AssetRequest.urgency == 'high', 2),
+                (AssetRequest.urgency == 'medium', 3),
+                else_=4
+            ),
+            AssetRequest.created_at.asc()
+        )
+        
+        candidates = base_query.limit(limit).all()
+        
+        return [
+            {
+                'id': row.id,
+                'status': row.status,
+                'required_category': row.required_category,
+                'required_quantity': row.required_quantity,
+                'max_budget': row.max_budget,
+                'urgency': row.urgency,
+                'preferred_conditions_json': row.preferred_conditions_json,
+                'tags_json': row.tags_json,
+                'expires_at': row.expires_at
+            }
+            for row in candidates
+        ]
     
     def _create_matches_for_request(
         self,
         request: AssetRequest,
         config_id: Optional[int] = None
     ) -> int:
-        config = None
-        if config_id:
-            config = MatchingConfig.query.get(config_id)
-        
-        if config:
-            self.matching_algorithm.update_weights(config)
-        
-        limit = self.matching_algorithm.get_max_matches_per_request()
-        
-        matches = self.matching_algorithm.find_listings_for_request(
-            request=request,
-            limit=limit * 2
-        )
-        
-        matches_created = 0
-        
-        for listing, score, scores in matches:
-            existing_match = AssetMatch.query.filter_by(
-                listing_id=listing.id,
-                request_id=request.id
-            ).first()
+        try:
+            locked_request = AssetRequest.query.filter_by(
+                id=request.id,
+                status='open'
+            ).with_for_update(skip_locked=True).first()
             
-            if existing_match:
-                continue
+            if not locked_request:
+                return 0
             
-            if matches_created >= limit:
-                break
+            if locked_request.required_quantity <= 0:
+                return 0
             
-            try:
-                match = AssetMatch(
-                    match_no=self._generate_match_no(),
-                    listing_id=listing.id,
-                    request_id=request.id,
-                    overall_score=score,
-                    category_match_score=scores['category'],
-                    condition_match_score=scores['condition'],
-                    value_match_score=scores['value'],
-                    quantity_match_score=scores['quantity'],
-                    urgency_match_score=scores['urgency'],
-                    tag_match_score=scores['tag'],
-                    matched_quantity=min(listing.available_quantity, request.required_quantity),
-                    matched_value=min(listing.available_quantity, request.required_quantity) * listing.suggested_transfer_value,
-                    status='pending',
-                    created_at=datetime.utcnow(),
-                    updated_at=datetime.utcnow()
+            config = None
+            if config_id:
+                config = MatchingConfig.query.get(config_id)
+            
+            if config:
+                self.matching_algorithm.update_weights(config)
+            
+            limit = self.matching_algorithm.get_max_matches_per_request()
+            min_score = self.matching_algorithm.get_min_match_score()
+            
+            candidate_listings = self._find_candidate_listings_for_request(
+                request=locked_request,
+                limit=limit * 3
+            )
+            
+            matches_created = 0
+            remaining_quantity = locked_request.required_quantity
+            
+            for listing_data in candidate_listings:
+                if matches_created >= limit:
+                    break
+                
+                if remaining_quantity <= 0:
+                    break
+                
+                listing_id = listing_data['id']
+                listing_status = listing_data['status']
+                
+                if listing_status != 'active':
+                    continue
+                
+                locked_listing = AssetListing.query.filter_by(
+                    id=listing_id,
+                    status='active'
+                ).with_for_update(skip_locked=True).first()
+                
+                if not locked_listing:
+                    continue
+                
+                if locked_listing.available_quantity <= 0:
+                    continue
+                
+                existing_match = AssetMatch.query.filter_by(
+                    listing_id=locked_listing.id,
+                    request_id=locked_request.id
+                ).first()
+                
+                if existing_match:
+                    continue
+                
+                overall_score, scores = self.matching_algorithm.calculate_overall_score(
+                    locked_listing, locked_request
                 )
                 
-                db.session.add(match)
-                matches_created += 1
+                if overall_score < min_score:
+                    continue
                 
-                listing.match_count = (listing.match_count or 0) + 1
-                request.match_count = (request.match_count or 0) + 1
+                matched_quantity = min(remaining_quantity, locked_listing.available_quantity)
+                matched_value = matched_quantity * locked_listing.suggested_transfer_value
                 
-            except Exception:
-                db.session.rollback()
-                continue
-        
-        if matches_created > 0:
+                try:
+                    match = AssetMatch(
+                        match_no=self._generate_match_no(),
+                        listing_id=locked_listing.id,
+                        request_id=locked_request.id,
+                        overall_score=overall_score,
+                        category_match_score=scores['category'],
+                        condition_match_score=scores['condition'],
+                        value_match_score=scores['value'],
+                        quantity_match_score=scores['quantity'],
+                        urgency_match_score=scores['urgency'],
+                        tag_match_score=scores['tag'],
+                        matched_quantity=matched_quantity,
+                        matched_value=matched_value,
+                        status='pending',
+                        created_at=datetime.utcnow(),
+                        updated_at=datetime.utcnow()
+                    )
+                    
+                    db.session.add(match)
+                    
+                    locked_listing.match_count = (locked_listing.match_count or 0) + 1
+                    locked_request.match_count = (locked_request.match_count or 0) + 1
+                    
+                    remaining_quantity -= matched_quantity
+                    matches_created += 1
+                    
+                except Exception:
+                    continue
+            
             db.session.commit()
+            return matches_created
+            
+        except Exception as e:
+            db.session.rollback()
+            raise e
+    
+    def _find_candidate_listings_for_request(
+        self,
+        request: AssetRequest,
+        limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        now = datetime.utcnow()
         
-        return matches_created
+        base_query = db.session.query(
+            AssetListing.id,
+            AssetListing.status,
+            AssetListing.category,
+            AssetListing.available_quantity,
+            AssetListing.suggested_transfer_value,
+            AssetListing.condition,
+            AssetListing.urgency,
+            AssetListing.tags_json,
+            AssetListing.expires_at
+        ).filter(
+            AssetListing.status == 'active',
+            AssetListing.owner_department_id != request.requester_department_id,
+            AssetListing.available_quantity > 0,
+            db.or_(
+                AssetListing.expires_at.is_(None),
+                AssetListing.expires_at > now
+            )
+        )
+        
+        if request.required_category:
+            base_query = base_query.filter(
+                db.or_(
+                    AssetListing.category == request.required_category,
+                    AssetListing.category.like(f'%{request.required_category}%')
+                )
+            )
+        
+        if request.max_budget and request.max_budget > 0:
+            base_query = base_query.filter(
+                AssetListing.suggested_transfer_value <= request.max_budget
+            )
+        
+        base_query = base_query.order_by(
+            db.case(
+                (AssetListing.urgency == 'critical', 1),
+                (AssetListing.urgency == 'high', 2),
+                (AssetListing.urgency == 'medium', 3),
+                else_=4
+            ),
+            db.case(
+                (AssetListing.condition == 'excellent', 1),
+                (AssetListing.condition == 'good', 2),
+                (AssetListing.condition == 'fair', 3),
+                else_=4
+            ),
+            AssetListing.listed_at.asc()
+        )
+        
+        candidates = base_query.limit(limit).all()
+        
+        return [
+            {
+                'id': row.id,
+                'status': row.status,
+                'category': row.category,
+                'available_quantity': row.available_quantity,
+                'suggested_transfer_value': row.suggested_transfer_value,
+                'condition': row.condition,
+                'urgency': row.urgency,
+                'tags_json': row.tags_json,
+                'expires_at': row.expires_at
+            }
+            for row in candidates
+        ]
     
     def propose_match(
         self,
