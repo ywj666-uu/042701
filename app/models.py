@@ -10,7 +10,9 @@ MODELS_WITH_UPDATED_AT = [
     'Asset', 'PurchaseRequest', 'AssetBorrow', 'AssetDisposal',
     'Budget', 'Inventory', 'Maintenance', 'MaintenancePlan',
     'Approval', 'AssetTransfer', 'Supplier', 'SupplierEvaluation',
-    'InventoryResult', 'QRCodeRecord'
+    'InventoryResult', 'QRCodeRecord',
+    'AssetListing', 'AssetRequest', 'AssetMatch', 'AssetTransferProposal',
+    'MatchingConfig', 'MatchTask'
 ]
 
 MODELS_WITH_CREATED_AT = [
@@ -18,7 +20,9 @@ MODELS_WITH_CREATED_AT = [
     'PurchaseRequestItem', 'AssetEntry', 'AssetEntryItem', 'AssetBorrow',
     'AssetDisposal', 'Budget', 'BudgetUsageLog', 'Inventory', 'InventoryItem',
     'Maintenance', 'MaintenancePlan', 'Approval', 'AssetTransfer', 'Notification',
-    'Supplier', 'SupplierEvaluation', 'InventoryResult', 'QRCodeRecord'
+    'Supplier', 'SupplierEvaluation', 'InventoryResult', 'QRCodeRecord',
+    'AssetListing', 'AssetRequest', 'AssetMatch', 'AssetTransferProposal',
+    'MatchingConfig', 'MatchTask'
 ]
 
 
@@ -1018,6 +1022,639 @@ class QRCodeRecord(db.Model):
     
     def __repr__(self):
         return f'<QRCodeRecord {self.id} - {self.asset_id}>'
+
+
+class AssetListing(db.Model):
+    __tablename__ = 'asset_listing'
+    
+    LISTING_STATUSES = ['active', 'pending', 'reserved', 'transferred', 'expired', 'cancelled']
+    URGENCY_LEVELS = ['low', 'medium', 'high', 'critical']
+    CONDITION_LEVELS = ['excellent', 'good', 'fair', 'poor']
+    
+    id = db.Column(db.Integer, primary_key=True)
+    listing_no = db.Column(db.String(64), unique=True, index=True, nullable=False)
+    
+    asset_id = db.Column(db.Integer, db.ForeignKey('asset.id'), nullable=False, index=True)
+    
+    owner_department_id = db.Column(db.Integer, db.ForeignKey('department.id'), nullable=False, index=True)
+    owner_user_id = db.Column(db.Integer, db.ForeignKey('user.id'), index=True)
+    
+    title = db.Column(db.String(256), nullable=False)
+    description = db.Column(db.Text)
+    
+    category = db.Column(db.String(128), index=True)
+    model = db.Column(db.String(128))
+    specification = db.Column(db.Text)
+    
+    condition = db.Column(db.String(32), default='good', nullable=False)
+    condition_description = db.Column(db.Text)
+    
+    original_value = db.Column(db.Float, default=0.0, nullable=False)
+    current_value = db.Column(db.Float, default=0.0, nullable=False)
+    suggested_transfer_value = db.Column(db.Float, default=0.0, nullable=False)
+    
+    available_quantity = db.Column(db.Integer, default=1, nullable=False)
+    minimum_transfer_quantity = db.Column(db.Integer, default=1, nullable=False)
+    
+    status = db.Column(db.String(32), default='active', nullable=False, index=True)
+    urgency = db.Column(db.String(32), default='low', nullable=False)
+    
+    listed_at = db.Column(db.DateTime, nullable=False, index=True)
+    expires_at = db.Column(db.DateTime, index=True)
+    
+    reserved_by = db.Column(db.Integer, db.ForeignKey('user.id'))
+    reserved_at = db.Column(db.DateTime)
+    
+    view_count = db.Column(db.Integer, default=0)
+    interest_count = db.Column(db.Integer, default=0)
+    match_count = db.Column(db.Integer, default=0)
+    
+    tags_json = db.Column(db.Text)
+    images_json = db.Column(db.Text)
+    notes = db.Column(db.Text)
+    
+    created_at = db.Column(db.DateTime, nullable=False)
+    updated_at = db.Column(db.DateTime, nullable=False)
+    
+    __table_args__ = (
+        CheckConstraint("status IN ('active', 'pending', 'reserved', 'transferred', 'expired', 'cancelled')", 
+                       name='ck_asset_listing_status'),
+        CheckConstraint("urgency IN ('low', 'medium', 'high', 'critical')", 
+                       name='ck_asset_listing_urgency'),
+        CheckConstraint("condition IN ('excellent', 'good', 'fair', 'poor')", 
+                       name='ck_asset_listing_condition'),
+        CheckConstraint('available_quantity >= 0', name='ck_asset_listing_qty'),
+        CheckConstraint('minimum_transfer_quantity >= 1', name='ck_asset_listing_min_qty'),
+        CheckConstraint('original_value >= 0', name='ck_asset_listing_original_value'),
+        CheckConstraint('current_value >= 0', name='ck_asset_listing_current_value'),
+        CheckConstraint('suggested_transfer_value >= 0', name='ck_asset_listing_transfer_value'),
+        db.Index('idx_listing_category_status', 'category', 'status'),
+        db.Index('idx_listing_department_status', 'owner_department_id', 'status'),
+        db.Index('idx_listing_listed_at', 'listed_at'),
+    )
+    
+    asset = db.relationship('Asset', backref='listings')
+    matches = db.relationship('AssetMatch', backref='listing', lazy='dynamic',
+                              foreign_keys='AssetMatch.listing_id')
+    proposals = db.relationship('AssetTransferProposal', backref='listing', lazy='dynamic',
+                                foreign_keys='AssetTransferProposal.listing_id')
+    
+    @validates('status')
+    def validate_status(self, key, value):
+        if value not in self.LISTING_STATUSES:
+            raise ValueError(f'无效的状态: {value}')
+        return value
+    
+    @validates('urgency')
+    def validate_urgency(self, key, value):
+        if value not in self.URGENCY_LEVELS:
+            raise ValueError(f'无效的紧急度: {value}')
+        return value
+    
+    @validates('condition')
+    def validate_condition(self, key, value):
+        if value not in self.CONDITION_LEVELS:
+            raise ValueError(f'无效的状态: {value}')
+        return value
+    
+    def get_tags(self):
+        if self.tags_json:
+            import json
+            return json.loads(self.tags_json)
+        return []
+    
+    def set_tags(self, tags):
+        import json
+        self.tags_json = json.dumps(tags, ensure_ascii=False)
+    
+    def get_images(self):
+        if self.images_json:
+            import json
+            return json.loads(self.images_json)
+        return []
+    
+    def set_images(self, images):
+        import json
+        self.images_json = json.dumps(images, ensure_ascii=False)
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'listing_no': self.listing_no,
+            'asset_id': self.asset_id,
+            'owner_department_id': self.owner_department_id,
+            'owner_user_id': self.owner_user_id,
+            'title': self.title,
+            'description': self.description,
+            'category': self.category,
+            'model': self.model,
+            'specification': self.specification,
+            'condition': self.condition,
+            'condition_description': self.condition_description,
+            'original_value': self.original_value,
+            'current_value': self.current_value,
+            'suggested_transfer_value': self.suggested_transfer_value,
+            'available_quantity': self.available_quantity,
+            'minimum_transfer_quantity': self.minimum_transfer_quantity,
+            'status': self.status,
+            'urgency': self.urgency,
+            'listed_at': self.listed_at.isoformat() if self.listed_at else None,
+            'expires_at': self.expires_at.isoformat() if self.expires_at else None,
+            'reserved_by': self.reserved_by,
+            'reserved_at': self.reserved_at.isoformat() if self.reserved_at else None,
+            'view_count': self.view_count,
+            'interest_count': self.interest_count,
+            'match_count': self.match_count,
+            'tags': self.get_tags(),
+            'images': self.get_images()
+        }
+    
+    def __repr__(self):
+        return f'<AssetListing {self.listing_no}>'
+
+
+class AssetRequest(db.Model):
+    __tablename__ = 'asset_request'
+    
+    REQUEST_STATUSES = ['open', 'matched', 'reserved', 'fulfilled', 'expired', 'cancelled']
+    URGENCY_LEVELS = ['low', 'medium', 'high', 'critical']
+    CONDITION_LEVELS = ['excellent', 'good', 'fair', 'poor']
+    
+    id = db.Column(db.Integer, primary_key=True)
+    request_no = db.Column(db.String(64), unique=True, index=True, nullable=False)
+    
+    requester_department_id = db.Column(db.Integer, db.ForeignKey('department.id'), nullable=False, index=True)
+    requester_user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+    
+    title = db.Column(db.String(256), nullable=False)
+    description = db.Column(db.Text)
+    
+    required_category = db.Column(db.String(128), index=True)
+    required_quantity = db.Column(db.Integer, default=1, nullable=False)
+    
+    max_budget = db.Column(db.Float)
+    
+    preferred_conditions_json = db.Column(db.Text)
+    
+    urgency = db.Column(db.String(32), default='medium', nullable=False)
+    need_by_date = db.Column(db.DateTime, index=True)
+    
+    tags_json = db.Column(db.Text)
+    alternative_options = db.Column(db.Text)
+    
+    status = db.Column(db.String(32), default='open', nullable=False, index=True)
+    
+    created_at = db.Column(db.DateTime, nullable=False, index=True)
+    expires_at = db.Column(db.DateTime, index=True)
+    
+    view_count = db.Column(db.Integer, default=0)
+    match_count = db.Column(db.Integer, default=0)
+    
+    notes = db.Column(db.Text)
+    
+    created_at = db.Column(db.DateTime, nullable=False)
+    updated_at = db.Column(db.DateTime, nullable=False)
+    
+    __table_args__ = (
+        CheckConstraint("status IN ('open', 'matched', 'reserved', 'fulfilled', 'expired', 'cancelled')", 
+                       name='ck_asset_request_status'),
+        CheckConstraint("urgency IN ('low', 'medium', 'high', 'critical')", 
+                       name='ck_asset_request_urgency'),
+        CheckConstraint('required_quantity >= 1', name='ck_asset_request_qty'),
+        CheckConstraint('max_budget >= 0 OR max_budget IS NULL', name='ck_asset_request_budget'),
+        db.Index('idx_request_category_status', 'required_category', 'status'),
+        db.Index('idx_request_department_status', 'requester_department_id', 'status'),
+        db.Index('idx_request_created_at', 'created_at'),
+    )
+    
+    matches = db.relationship('AssetMatch', backref='request', lazy='dynamic',
+                              foreign_keys='AssetMatch.request_id')
+    proposals = db.relationship('AssetTransferProposal', backref='request', lazy='dynamic',
+                                foreign_keys='AssetTransferProposal.request_id')
+    
+    @validates('status')
+    def validate_status(self, key, value):
+        if value not in self.REQUEST_STATUSES:
+            raise ValueError(f'无效的状态: {value}')
+        return value
+    
+    @validates('urgency')
+    def validate_urgency(self, key, value):
+        if value not in self.URGENCY_LEVELS:
+            raise ValueError(f'无效的紧急度: {value}')
+        return value
+    
+    def get_preferred_conditions(self):
+        if self.preferred_conditions_json:
+            import json
+            return json.loads(self.preferred_conditions_json)
+        return ['excellent', 'good']
+    
+    def set_preferred_conditions(self, conditions):
+        import json
+        self.preferred_conditions_json = json.dumps(conditions, ensure_ascii=False)
+    
+    def get_tags(self):
+        if self.tags_json:
+            import json
+            return json.loads(self.tags_json)
+        return []
+    
+    def set_tags(self, tags):
+        import json
+        self.tags_json = json.dumps(tags, ensure_ascii=False)
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'request_no': self.request_no,
+            'requester_department_id': self.requester_department_id,
+            'requester_user_id': self.requester_user_id,
+            'title': self.title,
+            'description': self.description,
+            'required_category': self.required_category,
+            'required_quantity': self.required_quantity,
+            'max_budget': self.max_budget,
+            'preferred_conditions': self.get_preferred_conditions(),
+            'urgency': self.urgency,
+            'need_by_date': self.need_by_date.isoformat() if self.need_by_date else None,
+            'tags': self.get_tags(),
+            'alternative_options': self.alternative_options,
+            'status': self.status,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'expires_at': self.expires_at.isoformat() if self.expires_at else None,
+            'view_count': self.view_count,
+            'match_count': self.match_count
+        }
+    
+    def __repr__(self):
+        return f'<AssetRequest {self.request_no}>'
+
+
+class AssetMatch(db.Model):
+    __tablename__ = 'asset_match'
+    
+    MATCH_STATUSES = ['pending', 'proposed', 'accepted', 'rejected', 'completed']
+    
+    id = db.Column(db.Integer, primary_key=True)
+    match_no = db.Column(db.String(64), unique=True, index=True, nullable=False)
+    
+    listing_id = db.Column(db.Integer, db.ForeignKey('asset_listing.id'), nullable=False, index=True)
+    request_id = db.Column(db.Integer, db.ForeignKey('asset_request.id'), nullable=False, index=True)
+    
+    overall_score = db.Column(db.Float, default=0.0, nullable=False)
+    category_match_score = db.Column(db.Float, default=0.0)
+    condition_match_score = db.Column(db.Float, default=0.0)
+    value_match_score = db.Column(db.Float, default=0.0)
+    quantity_match_score = db.Column(db.Float, default=0.0)
+    urgency_match_score = db.Column(db.Float, default=0.0)
+    tag_match_score = db.Column(db.Float, default=0.0)
+    
+    matched_quantity = db.Column(db.Integer, default=0, nullable=False)
+    matched_value = db.Column(db.Float, default=0.0, nullable=False)
+    
+    status = db.Column(db.String(32), default='pending', nullable=False, index=True)
+    
+    proposed_at = db.Column(db.DateTime)
+    accepted_at = db.Column(db.DateTime)
+    rejected_at = db.Column(db.DateTime)
+    completed_at = db.Column(db.DateTime)
+    
+    rejection_reason = db.Column(db.Text)
+    
+    notes = db.Column(db.Text)
+    
+    created_at = db.Column(db.DateTime, nullable=False, index=True)
+    updated_at = db.Column(db.DateTime, nullable=False)
+    
+    __table_args__ = (
+        CheckConstraint("status IN ('pending', 'proposed', 'accepted', 'rejected', 'completed')", 
+                       name='ck_asset_match_status'),
+        CheckConstraint('overall_score >= 0 AND overall_score <= 1', name='ck_match_overall_score'),
+        CheckConstraint('category_match_score >= 0 AND category_match_score <= 1', name='ck_match_category_score'),
+        CheckConstraint('condition_match_score >= 0 AND condition_match_score <= 1', name='ck_match_condition_score'),
+        CheckConstraint('value_match_score >= 0 AND value_match_score <= 1', name='ck_match_value_score'),
+        CheckConstraint('quantity_match_score >= 0 AND quantity_match_score <= 1', name='ck_match_quantity_score'),
+        CheckConstraint('urgency_match_score >= 0 AND urgency_match_score <= 1', name='ck_match_urgency_score'),
+        CheckConstraint('tag_match_score >= 0 AND tag_match_score <= 1', name='ck_match_tag_score'),
+        CheckConstraint('matched_quantity >= 0', name='ck_match_qty'),
+        CheckConstraint('matched_value >= 0', name='ck_match_value'),
+        db.UniqueConstraint('listing_id', 'request_id', name='uq_match_listing_request'),
+        db.Index('idx_match_status', 'status'),
+        db.Index('idx_match_created_at', 'created_at'),
+    )
+    
+    proposals = db.relationship('AssetTransferProposal', backref='match', lazy='dynamic',
+                                foreign_keys='AssetTransferProposal.match_id')
+    
+    @validates('status')
+    def validate_status(self, key, value):
+        if value not in self.MATCH_STATUSES:
+            raise ValueError(f'无效的状态: {value}')
+        return value
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'match_no': self.match_no,
+            'listing_id': self.listing_id,
+            'request_id': self.request_id,
+            'overall_score': self.overall_score,
+            'scores': {
+                'category': self.category_match_score,
+                'condition': self.condition_match_score,
+                'value': self.value_match_score,
+                'quantity': self.quantity_match_score,
+                'urgency': self.urgency_match_score,
+                'tags': self.tag_match_score
+            },
+            'matched_quantity': self.matched_quantity,
+            'matched_value': self.matched_value,
+            'status': self.status,
+            'proposed_at': self.proposed_at.isoformat() if self.proposed_at else None,
+            'accepted_at': self.accepted_at.isoformat() if self.accepted_at else None,
+            'rejected_at': self.rejected_at.isoformat() if self.rejected_at else None,
+            'rejection_reason': self.rejection_reason,
+            'created_at': self.created_at.isoformat() if self.created_at else None
+        }
+    
+    def __repr__(self):
+        return f'<AssetMatch {self.match_no}>'
+
+
+class AssetTransferProposal(db.Model):
+    __tablename__ = 'asset_transfer_proposal'
+    
+    PROPOSAL_STATUSES = ['pending', 'approved', 'rejected', 'completed', 'cancelled']
+    
+    id = db.Column(db.Integer, primary_key=True)
+    proposal_no = db.Column(db.String(64), unique=True, index=True, nullable=False)
+    
+    match_id = db.Column(db.Integer, db.ForeignKey('asset_match.id'), nullable=False, index=True)
+    listing_id = db.Column(db.Integer, db.ForeignKey('asset_listing.id'), nullable=False, index=True)
+    request_id = db.Column(db.Integer, db.ForeignKey('asset_request.id'), nullable=False, index=True)
+    
+    from_department_id = db.Column(db.Integer, db.ForeignKey('department.id'), nullable=False, index=True)
+    to_department_id = db.Column(db.Integer, db.ForeignKey('department.id'), nullable=False, index=True)
+    
+    from_user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    to_user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    
+    asset_id = db.Column(db.Integer, db.ForeignKey('asset.id'), nullable=False)
+    quantity = db.Column(db.Integer, default=1, nullable=False)
+    
+    transfer_value = db.Column(db.Float, default=0.0, nullable=False)
+    transfer_date = db.Column(db.DateTime)
+    
+    status = db.Column(db.String(32), default='pending', nullable=False, index=True)
+    
+    approved_at = db.Column(db.DateTime)
+    approved_by = db.Column(db.Integer, db.ForeignKey('user.id'))
+    approval_comments = db.Column(db.Text)
+    
+    rejected_at = db.Column(db.DateTime)
+    rejected_by = db.Column(db.Integer, db.ForeignKey('user.id'))
+    rejection_reason = db.Column(db.Text)
+    
+    completed_at = db.Column(db.DateTime)
+    
+    notes = db.Column(db.Text)
+    
+    created_at = db.Column(db.DateTime, nullable=False, index=True)
+    updated_at = db.Column(db.DateTime, nullable=False)
+    
+    __table_args__ = (
+        CheckConstraint("status IN ('pending', 'approved', 'rejected', 'completed', 'cancelled')", 
+                       name='ck_transfer_proposal_status'),
+        CheckConstraint('quantity >= 1', name='ck_transfer_proposal_qty'),
+        CheckConstraint('transfer_value >= 0', name='ck_transfer_proposal_value'),
+        db.Index('idx_proposal_status', 'status'),
+        db.Index('idx_proposal_created_at', 'created_at'),
+    )
+    
+    asset = db.relationship('Asset', backref='transfer_proposals')
+    
+    @validates('status')
+    def validate_status(self, key, value):
+        if value not in self.PROPOSAL_STATUSES:
+            raise ValueError(f'无效的状态: {value}')
+        return value
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'proposal_no': self.proposal_no,
+            'match_id': self.match_id,
+            'listing_id': self.listing_id,
+            'request_id': self.request_id,
+            'from_department_id': self.from_department_id,
+            'to_department_id': self.to_department_id,
+            'from_user_id': self.from_user_id,
+            'to_user_id': self.to_user_id,
+            'asset_id': self.asset_id,
+            'quantity': self.quantity,
+            'transfer_value': self.transfer_value,
+            'transfer_date': self.transfer_date.isoformat() if self.transfer_date else None,
+            'status': self.status,
+            'approved_at': self.approved_at.isoformat() if self.approved_at else None,
+            'approved_by': self.approved_by,
+            'approval_comments': self.approval_comments,
+            'rejected_at': self.rejected_at.isoformat() if self.rejected_at else None,
+            'rejection_reason': self.rejection_reason,
+            'completed_at': self.completed_at.isoformat() if self.completed_at else None,
+            'created_at': self.created_at.isoformat() if self.created_at else None
+        }
+    
+    def __repr__(self):
+        return f'<AssetTransferProposal {self.proposal_no}>'
+
+
+class MatchingConfig(db.Model):
+    __tablename__ = 'matching_config'
+    
+    CONFIG_TYPES = ['global', 'department', 'category']
+    
+    id = db.Column(db.Integer, primary_key=True)
+    config_name = db.Column(db.String(128), nullable=False)
+    config_type = db.Column(db.String(32), default='global', nullable=False)
+    
+    target_department_id = db.Column(db.Integer, db.ForeignKey('department.id'))
+    target_category = db.Column(db.String(128))
+    
+    category_weight = db.Column(db.Float, default=0.25, nullable=False)
+    condition_weight = db.Column(db.Float, default=0.20, nullable=False)
+    value_weight = db.Column(db.Float, default=0.20, nullable=False)
+    quantity_weight = db.Column(db.Float, default=0.15, nullable=False)
+    urgency_weight = db.Column(db.Float, default=0.10, nullable=False)
+    tag_weight = db.Column(db.Float, default=0.10, nullable=False)
+    
+    min_match_score = db.Column(db.Float, default=0.5, nullable=False)
+    max_matches_per_listing = db.Column(db.Integer, default=5)
+    max_matches_per_request = db.Column(db.Integer, default=5)
+    
+    auto_approve_threshold = db.Column(db.Float, default=0.9)
+    
+    is_active = db.Column(db.Boolean, default=True, nullable=False)
+    priority = db.Column(db.Integer, default=0)
+    
+    description = db.Column(db.Text)
+    
+    created_at = db.Column(db.DateTime, nullable=False)
+    updated_at = db.Column(db.DateTime, nullable=False)
+    
+    __table_args__ = (
+        CheckConstraint("config_type IN ('global', 'department', 'category')", 
+                       name='ck_matching_config_type'),
+        CheckConstraint('category_weight >= 0 AND category_weight <= 1', name='ck_config_category_weight'),
+        CheckConstraint('condition_weight >= 0 AND condition_weight <= 1', name='ck_config_condition_weight'),
+        CheckConstraint('value_weight >= 0 AND value_weight <= 1', name='ck_config_value_weight'),
+        CheckConstraint('quantity_weight >= 0 AND quantity_weight <= 1', name='ck_config_quantity_weight'),
+        CheckConstraint('urgency_weight >= 0 AND urgency_weight <= 1', name='ck_config_urgency_weight'),
+        CheckConstraint('tag_weight >= 0 AND tag_weight <= 1', name='ck_config_tag_weight'),
+        CheckConstraint('min_match_score >= 0 AND min_match_score <= 1', name='ck_config_min_score'),
+        CheckConstraint('max_matches_per_listing >= 1', name='ck_config_max_listing_matches'),
+        CheckConstraint('max_matches_per_request >= 1', name='ck_config_max_request_matches'),
+        CheckConstraint('auto_approve_threshold >= 0 AND auto_approve_threshold <= 1', name='ck_config_auto_approve'),
+        db.Index('idx_matching_config_type_active', 'config_type', 'is_active'),
+    )
+    
+    @validates('config_type')
+    def validate_config_type(self, key, value):
+        if value not in self.CONFIG_TYPES:
+            raise ValueError(f'无效的配置类型: {value}')
+        return value
+    
+    def get_weights(self) -> dict:
+        return {
+            'category': self.category_weight,
+            'condition': self.condition_weight,
+            'value': self.value_weight,
+            'quantity': self.quantity_weight,
+            'urgency': self.urgency_weight,
+            'tag': self.tag_weight
+        }
+    
+    def validate_weights(self) -> Tuple[bool, str]:
+        total = (
+            self.category_weight +
+            self.condition_weight +
+            self.value_weight +
+            self.quantity_weight +
+            self.urgency_weight +
+            self.tag_weight
+        )
+        
+        if abs(total - 1.0) > 0.001:
+            return False, f'权重总和必须为1.0，当前为 {total}'
+        
+        return True, '权重配置有效'
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'config_name': self.config_name,
+            'config_type': self.config_type,
+            'target_department_id': self.target_department_id,
+            'target_category': self.target_category,
+            'weights': self.get_weights(),
+            'min_match_score': self.min_match_score,
+            'max_matches_per_listing': self.max_matches_per_listing,
+            'max_matches_per_request': self.max_matches_per_request,
+            'auto_approve_threshold': self.auto_approve_threshold,
+            'is_active': self.is_active,
+            'priority': self.priority,
+            'description': self.description,
+            'created_at': self.created_at.isoformat() if self.created_at else None
+        }
+    
+    def __repr__(self):
+        return f'<MatchingConfig {self.config_name}>'
+
+
+class MatchTask(db.Model):
+    __tablename__ = 'match_task'
+    
+    TASK_TYPES = ['listing_match', 'request_match', 'batch_match']
+    TASK_STATUSES = ['pending', 'processing', 'completed', 'failed', 'cancelled']
+    
+    id = db.Column(db.Integer, primary_key=True)
+    task_no = db.Column(db.String(64), unique=True, index=True, nullable=False)
+    
+    task_type = db.Column(db.String(32), nullable=False)
+    
+    listing_id = db.Column(db.Integer, db.ForeignKey('asset_listing.id'))
+    request_id = db.Column(db.Integer, db.ForeignKey('asset_request.id'))
+    
+    target_department_id = db.Column(db.Integer, db.ForeignKey('department.id'))
+    target_category = db.Column(db.String(128))
+    
+    config_id = db.Column(db.Integer, db.ForeignKey('matching_config.id'))
+    
+    status = db.Column(db.String(32), default='pending', nullable=False, index=True)
+    
+    scheduled_at = db.Column(db.DateTime, index=True)
+    started_at = db.Column(db.DateTime)
+    completed_at = db.Column(db.DateTime)
+    failed_at = db.Column(db.DateTime)
+    
+    matches_found = db.Column(db.Integer, default=0)
+    matches_created = db.Column(db.Integer, default=0)
+    
+    error_message = db.Column(db.Text)
+    
+    created_by = db.Column(db.Integer, db.ForeignKey('user.id'))
+    
+    created_at = db.Column(db.DateTime, nullable=False, index=True)
+    updated_at = db.Column(db.DateTime, nullable=False)
+    
+    __table_args__ = (
+        CheckConstraint("task_type IN ('listing_match', 'request_match', 'batch_match')", 
+                       name='ck_match_task_type'),
+        CheckConstraint("status IN ('pending', 'processing', 'completed', 'failed', 'cancelled')", 
+                       name='ck_match_task_status'),
+        CheckConstraint('matches_found >= 0', name='ck_match_task_found'),
+        CheckConstraint('matches_created >= 0', name='ck_match_task_created'),
+        db.Index('idx_match_task_status_created', 'status', 'created_at'),
+        db.Index('idx_match_task_scheduled', 'scheduled_at'),
+    )
+    
+    config = db.relationship('MatchingConfig', backref='tasks')
+    
+    @validates('task_type')
+    def validate_task_type(self, key, value):
+        if value not in self.TASK_TYPES:
+            raise ValueError(f'无效的任务类型: {value}')
+        return value
+    
+    @validates('status')
+    def validate_status(self, key, value):
+        if value not in self.TASK_STATUSES:
+            raise ValueError(f'无效的状态: {value}')
+        return value
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'task_no': self.task_no,
+            'task_type': self.task_type,
+            'listing_id': self.listing_id,
+            'request_id': self.request_id,
+            'target_department_id': self.target_department_id,
+            'target_category': self.target_category,
+            'config_id': self.config_id,
+            'status': self.status,
+            'scheduled_at': self.scheduled_at.isoformat() if self.scheduled_at else None,
+            'started_at': self.started_at.isoformat() if self.started_at else None,
+            'completed_at': self.completed_at.isoformat() if self.completed_at else None,
+            'matches_found': self.matches_found,
+            'matches_created': self.matches_created,
+            'error_message': self.error_message,
+            'created_by': self.created_by,
+            'created_at': self.created_at.isoformat() if self.created_at else None
+        }
+    
+    def __repr__(self):
+        return f'<MatchTask {self.task_no}>'
 
 
 @login_manager.user_loader

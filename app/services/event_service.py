@@ -26,6 +26,27 @@ class EventType(Enum):
     BUDGET_WARNING = 'budget_warning'
     
     NOTIFICATION_SEND = 'notification_send'
+    
+    MATCH_TASK_CREATED = 'match_task_created'
+    MATCH_TASK_COMPLETED = 'match_task_completed'
+    MATCH_TASK_FAILED = 'match_task_failed'
+    
+    LISTING_CREATED = 'listing_created'
+    LISTING_EXPIRED = 'listing_expired'
+    LISTING_TRANSFERRED = 'listing_transferred'
+    
+    REQUEST_CREATED = 'request_created'
+    REQUEST_FULFILLED = 'request_fulfilled'
+    REQUEST_EXPIRED = 'request_expired'
+    
+    MATCH_PROPOSED = 'match_proposed'
+    MATCH_ACCEPTED = 'match_accepted'
+    MATCH_REJECTED = 'match_rejected'
+    MATCH_COMPLETED = 'match_completed'
+    
+    TRANSFER_PROPOSAL_APPROVED = 'transfer_proposal_approved'
+    TRANSFER_PROPOSAL_REJECTED = 'transfer_proposal_rejected'
+    ASSET_TRANSFER_COMPLETED = 'asset_transfer_completed'
 
 
 class EventPriority(Enum):
