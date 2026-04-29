@@ -1,0 +1,312 @@
+{% extends "base.html" %}
+
+{% block title %}仪表盘 - 固定资产管理系统{% endblock %}
+
+{% block content %}
+<!-- 页面标题 -->
+<div class="d-sm-flex align-items-center justify-content-between mb-4">
+    <h1 class="h3 mb-0 text-gray-800">仪表盘</h1>
+    <a href="#" class="d-none d-sm-inline-block btn btn-sm btn-primary shadow-sm">
+        <i class="bi bi-download text-white-50 me-1"></i> 生成报告
+    </a>
+</div>
+
+<!-- 统计卡片 -->
+<div class="row mb-4">
+    <!-- 总资产 -->
+    <div class="col-xl-3 col-md-6 mb-4">
+        <div class="card stat-card primary h-100 py-2">
+            <div class="card-body">
+                <div class="row no-gutters align-items-center">
+                    <div class="col mr-2">
+                        <div class="text-xs font-weight-bold text-primary text-uppercase mb-1">
+                            总资产</div>
+                        <div class="h5 mb-0 font-weight-bold text-gray-800">{{ total_assets }}</div>
+                    </div>
+                    <div class="col-auto">
+                        <i class="bi bi-boxes fa-2x text-gray-300" style="font-size: 2rem;"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- 使用中 -->
+    <div class="col-xl-3 col-md-6 mb-4">
+        <div class="card stat-card success h-100 py-2">
+            <div class="card-body">
+                <div class="row no-gutters align-items-center">
+                    <div class="col mr-2">
+                        <div class="text-xs font-weight-bold text-success text-uppercase mb-1">
+                            使用中</div>
+                        <div class="h5 mb-0 font-weight-bold text-gray-800">{{ in_use_assets }}</div>
+                    </div>
+                    <div class="col-auto">
+                        <i class="bi bi-laptop text-gray-300" style="font-size: 2rem;"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- 在库 -->
+    <div class="col-xl-3 col-md-6 mb-4">
+        <div class="card stat-card info h-100 py-2">
+            <div class="card-body">
+                <div class="row no-gutters align-items-center">
+                    <div class="col mr-2">
+                        <div class="text-xs font-weight-bold text-info text-uppercase mb-1">
+                            在库</div>
+                        <div class="h5 mb-0 font-weight-bold text-gray-800">{{ in_stock_assets }}</div>
+                    </div>
+                    <div class="col-auto">
+                        <i class="bi bi-archive text-gray-300" style="font-size: 2rem;"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- 维护中 -->
+    <div class="col-xl-3 col-md-6 mb-4">
+        <div class="card stat-card warning h-100 py-2">
+            <div class="card-body">
+                <div class="row no-gutters align-items-center">
+                    <div class="col mr-2">
+                        <div class="text-xs font-weight-bold text-warning text-uppercase mb-1">
+                            维护中</div>
+                        <div class="h5 mb-0 font-weight-bold text-gray-800">{{ maintenance_assets }}</div>
+                    </div>
+                    <div class="col-auto">
+                        <i class="bi bi-tools text-gray-300" style="font-size: 2rem;"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 内容行 -->
+<div class="row">
+    <!-- 左侧列 -->
+    <div class="col-lg-8">
+        <!-- 待办事项 -->
+        <div class="card shadow mb-4">
+            <div class="card-header py-3 d-flex flex-row align-items-center justify-content-between">
+                <h6 class="m-0 font-weight-bold text-primary">待办事项</h6>
+            </div>
+            <div class="card-body">
+                {% if current_user.role in ['manager', 'admin'] %}
+                <div class="mb-4">
+                    <h5 class="small text-uppercase text-gray-500 mb-3">待审批</h5>
+                    {% if pending_approval_count > 0 %}
+                    <div class="alert alert-warning" role="alert">
+                        <i class="bi bi-exclamation-triangle me-2"></i>
+                        您有 <strong>{{ pending_approval_count }}</strong> 个待审批事项
+                        <a href="#" class="alert-link ms-2">立即处理</a>
+                    </div>
+                    {% else %}
+                    <div class="text-center py-3 text-gray-500">
+                        <i class="bi bi-check-circle" style="font-size: 2rem;"></i>
+                        <p class="mt-2">暂无待审批事项</p>
+                    </div>
+                    {% endif %}
+                </div>
+                {% endif %}
+                
+                <!-- 即将到期的借用 -->
+                <div class="mb-4">
+                    <h5 class="small text-uppercase text-gray-500 mb-3">即将到期的借用</h5>
+                    {% if upcoming_returns %}
+                    <div class="table-responsive">
+                        <table class="table table-hover table-sm">
+                            <thead>
+                                <tr>
+                                    <th>资产名称</th>
+                                    <th>借用人</th>
+                                    <th>预计归还日期</th>
+                                    <th>状态</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for borrow in upcoming_returns %}
+                                <tr>
+                                    <td>
+                                        <a href="{{ url_for('assets.detail', asset_id=borrow.asset_id) }}">
+                                            {{ borrow.asset.name }}
+                                        </a>
+                                    </td>
+                                    <td>{{ borrow.borrower.name }}</td>
+                                    <td>{{ borrow.expected_return_date.strftime('%Y-%m-%d') if borrow.expected_return_date else '-' }}</td>
+                                    <td>
+                                        <span class="status-badge status-{{ borrow.status }}">
+                                            {% if borrow.status == 'borrowed' %}借用中
+                                            {% elif borrow.status == 'pending' %}待审批
+                                            {% elif borrow.status == 'returned' %}已归还
+                                            {% elif borrow.status == 'approved' %}已批准
+                                            {% elif borrow.status == 'rejected' %}已拒绝
+                                            {% else %}{{ borrow.status }}
+                                            {% endif %}
+                                        </span>
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    {% else %}
+                    <div class="text-center py-3 text-gray-500">
+                        <i class="bi bi-calendar-check" style="font-size: 2rem;"></i>
+                        <p class="mt-2">暂无即将到期的借用</p>
+                    </div>
+                    {% endif %}
+                </div>
+                
+                <!-- 即将到期的维保 -->
+                <div>
+                    <h5 class="small text-uppercase text-gray-500 mb-3">即将到期的维保</h5>
+                    {% if upcoming_maintenances %}
+                    <div class="table-responsive">
+                        <table class="table table-hover table-sm">
+                            <thead>
+                                <tr>
+                                    <th>资产名称</th>
+                                    <th>维护类型</th>
+                                    <th>预约时间</th>
+                                    <th>状态</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for mt in upcoming_maintenances %}
+                                <tr>
+                                    <td>
+                                        <a href="{{ url_for('maintenance.detail', maintenance_id=mt.id) }}">
+                                            {{ mt.asset.name }}
+                                        </a>
+                                    </td>
+                                    <td>
+                                        {% if mt.maintenance_type == 'repair' %}维修
+                                        {% elif mt.maintenance_type == 'maintenance' %}保养
+                                        {% elif mt.maintenance_type == 'inspection' %}巡检
+                                        {% else %}{{ mt.maintenance_type }}
+                                        {% endif %}
+                                    </td>
+                                    <td>{{ mt.schedule_date.strftime('%Y-%m-%d %H:%M') if mt.schedule_date else '-' }}</td>
+                                    <td>
+                                        <span class="status-badge status-{{ mt.status }}">
+                                            {% if mt.status == 'scheduled' %}已预约
+                                            {% elif mt.status == 'in_progress' %}进行中
+                                            {% elif mt.status == 'completed' %}已完成
+                                            {% elif mt.status == 'cancelled' %}已取消
+                                            {% else %}{{ mt.status }}
+                                            {% endif %}
+                                        </span>
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    {% else %}
+                    <div class="text-center py-3 text-gray-500">
+                        <i class="bi bi-tools" style="font-size: 2rem;"></i>
+                        <p class="mt-2">暂无即将到期的维保</p>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- 右侧列 -->
+    <div class="col-lg-4">
+        <!-- 预算信息 -->
+        {% if budget_info %}
+        <div class="card shadow mb-4">
+            <div class="card-header py-3">
+                <h6 class="m-0 font-weight-bold text-primary">部门预算</h6>
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <div class="d-flex justify-content-between mb-1">
+                        <span class="small text-gray-500">已使用</span>
+                        <span class="small font-weight-bold">{{ "%.2f"|format(budget_info.percentage) }}%</span>
+                    </div>
+                    <div class="progress" style="height: 1.5rem;">
+                        <div class="progress-bar 
+                            {% if budget_info.percentage >= 90 %}bg-danger
+                            {% elif budget_info.percentage >= 80 %}bg-warning
+                            {% else %}bg-success{% endif %}" 
+                            role="progressbar" 
+                            style="width: {{ budget_info.percentage }}%"
+                            aria-valuenow="{{ budget_info.percentage }}" 
+                            aria-valuemin="0" 
+                            aria-valuemax="100">
+                            {{ "%.1f"|format(budget_info.percentage) }}%
+                        </div>
+                    </div>
+                </div>
+                <div class="row text-center">
+                    <div class="col-4">
+                        <div class="small text-gray-500">总预算</div>
+                        <div class="font-weight-bold">¥{{ "%.2f"|format(budget_info.total) }}</div>
+                    </div>
+                    <div class="col-4">
+                        <div class="small text-gray-500">已使用</div>
+                        <div class="font-weight-bold">¥{{ "%.2f"|format(budget_info.used) }}</div>
+                    </div>
+                    <div class="col-4">
+                        <div class="small text-gray-500">剩余</div>
+                        <div class="font-weight-bold">¥{{ "%.2f"|format(budget_info.remaining) }}</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+        
+        <!-- 快捷操作 -->
+        <div class="card shadow mb-4">
+            <div class="card-header py-3">
+                <h6 class="m-0 font-weight-bold text-primary">快捷操作</h6>
+            </div>
+            <div class="card-body">
+                <div class="d-grid gap-2">
+                    <a href="{{ url_for('assets.borrow') }}" class="btn btn-outline-primary">
+                        <i class="bi bi-arrow-right me-2"></i>资产领用/借用
+                    </a>
+                    <a href="{{ url_for('inventory.scan') }}" class="btn btn-outline-success">
+                        <i class="bi bi-upc-scan me-2"></i>扫码盘点
+                    </a>
+                    <a href="{{ url_for('maintenance.scan_start') }}" class="btn btn-outline-warning">
+                        <i class="bi bi-tools me-2"></i>维护开机
+                    </a>
+                    <a href="{{ url_for('budget.purchase_create') }}" class="btn btn-outline-info">
+                        <i class="bi bi-cart-plus me-2"></i>采购申请
+                    </a>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 未读通知 -->
+        {% if unread_notifications > 0 %}
+        <div class="card shadow mb-4 border-left-warning">
+            <div class="card-body">
+                <div class="row no-gutters align-items-center">
+                    <div class="col mr-2">
+                        <div class="text-xs font-weight-bold text-warning text-uppercase mb-1">
+                            未读通知</div>
+                        <div class="h5 mb-0 font-weight-bold text-gray-800">{{ unread_notifications }}</div>
+                    </div>
+                    <div class="col-auto">
+                        <i class="bi bi-bell-fill text-gray-300" style="font-size: 2rem;"></i>
+                    </div>
+                </div>
+                <a href="{{ url_for('notification.list') }}" class="btn btn-sm btn-warning mt-3 w-100">
+                    查看全部
+                </a>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
